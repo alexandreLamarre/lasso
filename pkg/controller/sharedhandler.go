@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rancher/lasso/pkg/metrics"
+	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -20,9 +21,10 @@ var (
 )
 
 type handlerEntry struct {
-	id      int64
-	name    string
-	handler SharedControllerHandler
+	id        int64
+	name      string
+	handler   SharedControllerHandler
+	parentCtx context.Context
 }
 
 type SharedHandler struct {
@@ -40,9 +42,10 @@ func (h *SharedHandler) Register(ctx context.Context, name string, handler Share
 
 	id := atomic.AddInt64(&h.idCounter, 1)
 	h.handlers = append(h.handlers, handlerEntry{
-		id:      id,
-		name:    name,
-		handler: handler,
+		id:        id,
+		name:      name,
+		handler:   handler,
+		parentCtx: ctx,
 	})
 
 	go func() {
@@ -60,7 +63,7 @@ func (h *SharedHandler) Register(ctx context.Context, name string, handler Share
 	}()
 }
 
-func (h *SharedHandler) OnChange(key string, obj runtime.Object) error {
+func (h *SharedHandler) OnChange(ctx context.Context, key string, obj runtime.Object) error {
 	var (
 		errs errorList
 	)
@@ -71,17 +74,24 @@ func (h *SharedHandler) OnChange(key string, obj runtime.Object) error {
 	}
 	h.lock.RUnlock()
 
+	parentSpanCtx, span := controllerTracer.Start(ctx, "SharedHandler.OnChange")
+	defer span.End()
+
 	for _, handler := range handlers {
 		var hasError bool
 		reconcileStartTS := time.Now()
 
-		newObj, err := handler.handler.OnChange(key, obj)
+		spanCtx, handlerSpan := controllerTracer.Start(parentSpanCtx, handler.name)
+		newObj, err := handler.handler.OnChange(spanCtx, key, obj)
 		if err != nil && !errors.Is(err, ErrIgnore) {
 			errs = append(errs, &handlerError{
 				HandlerName: handler.name,
 				Err:         err,
 			})
 			hasError = true
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "handler success")
 		}
 		metrics.IncTotalHandlerExecutions(h.controllerGVR, handler.name, hasError)
 		reconcileTime := time.Since(reconcileStartTS)
@@ -97,6 +107,7 @@ func (h *SharedHandler) OnChange(key string, obj runtime.Object) error {
 				obj = newObj
 			}
 		}
+		handlerSpan.End()
 	}
 
 	return errs.ToErr()
