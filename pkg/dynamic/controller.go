@@ -21,7 +21,7 @@ import (
 	"k8s.io/client-go/tools/cache"
 )
 
-type Handler func(obj runtime.Object) (runtime.Object, error)
+type Handler func(ctx context.Context, obj runtime.Object) (runtime.Object, error)
 type GVKMatcher func(gvk schema.GroupVersionKind) bool
 
 type handlerEntry struct {
@@ -389,28 +389,28 @@ func (c *Controller) List(gvk schema.GroupVersionKind, namespace string, selecto
 }
 
 func wrap(matcher GVKMatcher, handler Handler) controller.SharedControllerHandler {
-	return controller.SharedControllerHandlerFunc(func(key string, obj runtime.Object) (runtime.Object, error) {
+	return controller.SharedControllerHandlerFunc(func(ctx context.Context, key string, obj runtime.Object) (runtime.Object, error) {
 		if obj == nil {
 			return nil, nil
 		}
 		gvk := obj.GetObjectKind().GroupVersionKind()
 		if matcher(gvk) {
-			return handler(obj)
+			return handler(ctx, obj)
 		}
 		return obj, nil
 	})
 }
 
-func FromKeyHandler(handler func(string, runtime.Object) (runtime.Object, error)) Handler {
-	return func(obj runtime.Object) (runtime.Object, error) {
+func FromKeyHandler(handler func(context.Context, string, runtime.Object) (runtime.Object, error)) Handler {
+	return func(ctx context.Context, obj runtime.Object) (runtime.Object, error) {
 		meta, err := meta.Accessor(obj)
 		if err != nil {
 			return nil, err
 		}
 		if meta.GetNamespace() == "" {
-			return handler(meta.GetName(), obj)
+			return handler(ctx, meta.GetName(), obj)
 		}
-		return handler(meta.GetNamespace()+"/"+meta.GetName(), obj)
+		return handler(ctx, meta.GetNamespace()+"/"+meta.GetName(), obj)
 	}
 }
 

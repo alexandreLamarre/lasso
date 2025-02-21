@@ -25,17 +25,17 @@ import (
 const maxTimeout2min = 2 * time.Minute
 
 type Handler interface {
-	OnChange(key string, obj runtime.Object) error
+	OnChange(ctx context.Context, key string, obj runtime.Object) error
 }
 
 type ResourceVersionGetter interface {
 	GetResourceVersion() string
 }
 
-type HandlerFunc func(key string, obj runtime.Object) error
+type HandlerFunc func(ctx context.Context, key string, obj runtime.Object) error
 
-func (h HandlerFunc) OnChange(key string, obj runtime.Object) error {
-	return h(key, obj)
+func (h HandlerFunc) OnChange(ctx context.Context, key string, obj runtime.Object) error {
+	return h(ctx, key, obj)
 }
 
 type Controller interface {
@@ -230,10 +230,11 @@ func (c *controller) syncHandler(key string) error {
 		return err
 	}
 	if !exists {
-		return c.handler.OnChange(key, nil)
+		// TODO : context.TODO() should be an appropriate context
+		return c.handler.OnChange(context.TODO(), key, nil)
 	}
-
-	return c.handler.OnChange(key, obj.(runtime.Object))
+	// TODO : context.TODO() should be an appropriate context
+	return c.handler.OnChange(context.TODO(), key, obj.(runtime.Object))
 }
 
 func (c *controller) EnqueueKey(key string) {
