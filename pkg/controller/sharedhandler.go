@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rancher/lasso/pkg/metrics"
+	"github.com/rancher/lasso/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -63,6 +65,13 @@ func (h *SharedHandler) Register(ctx context.Context, name string, handler Share
 	}()
 }
 
+func (h *SharedHandler) staticAttrs() []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.Int64("atomic ID", h.idCounter),
+		attribute.String(tracing.AttributeControllerGVR, h.controllerGVR),
+	}
+}
+
 func (h *SharedHandler) OnChange(ctx context.Context, key string, obj runtime.Object) error {
 	var (
 		errs errorList
@@ -74,8 +83,30 @@ func (h *SharedHandler) OnChange(ctx context.Context, key string, obj runtime.Ob
 	}
 	h.lock.RUnlock()
 
+	if len(handlers) == 0 {
+		return errs.ToErr()
+	}
+
 	parentSpanCtx, span := controllerTracer.Start(ctx, "SharedHandler.OnChange")
 	defer span.End()
+
+	// FIXME: this doesn't really have the effect intended
+	if tracing.IsDistributedTracingEnabled() {
+		parentSpanCtx = tracing.Extract(parentSpanCtx, obj)
+	}
+
+	metaA, err := meta.Accessor(obj)
+	if err == nil {
+		span.SetAttributes(attribute.String(tracing.AttributeObjectUID, string(metaA.GetUID())))
+		span.SetAttributes(attribute.String(tracing.AttributeObjectName, metaA.GetName()))
+		span.SetAttributes(attribute.String(tracing.AttributeObjectNamespace, metaA.GetNamespace()))
+	}
+	// FIXME: this doesn't really have the effect intended
+	if tracing.IsDistributedTracingEnabled() {
+		tracing.Inject(parentSpanCtx, obj)
+	}
+
+	span.SetAttributes(h.staticAttrs()...)
 
 	for _, handler := range handlers {
 		var hasError bool

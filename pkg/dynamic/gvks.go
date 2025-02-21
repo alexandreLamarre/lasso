@@ -55,7 +55,7 @@ func watchGVKS(ctx context.Context,
 	return nil
 }
 
-func (g *gvkWatcher) onTypeChange(_ string, obj runtime.Object) (runtime.Object, error) {
+func (g *gvkWatcher) onTypeChange(ctx context.Context, _ string, obj runtime.Object) (runtime.Object, error) {
 	g.queueRefresh()
 	return obj, nil
 }

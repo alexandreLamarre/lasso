@@ -32,10 +32,10 @@ type ResourceVersionGetter interface {
 	GetResourceVersion() string
 }
 
-type HandlerFunc func(key string, obj runtime.Object) error
+type HandlerFunc func(ctx context.Context, key string, obj runtime.Object) error
 
-func (h HandlerFunc) OnChange(key string, obj runtime.Object) error {
-	return h(key, obj)
+func (h HandlerFunc) OnChange(ctx context.Context, key string, obj runtime.Object) error {
+	return h(ctx, key, obj)
 }
 
 type Controller interface {

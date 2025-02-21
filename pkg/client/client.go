@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rancher/lasso/pkg/tracing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -137,9 +138,9 @@ func (c *Client) setupCtx(ctx context.Context) (context.Context, func()) {
 
 func (c *Client) attrs() []attribute.KeyValue {
 	return []attribute.KeyValue{
-		attribute.String("apiVersion", c.apiVersion),
-		attribute.String("kind", c.kind),
-		attribute.StringSlice("prefix", c.prefix),
+		attribute.String(tracing.AttributeObjectApiVersion, c.apiVersion),
+		attribute.String(tracing.AttributeObjectKind, c.kind),
+		attribute.StringSlice("prefixes", c.prefix),
 		attribute.Bool("namespaced", c.Namespaced),
 	}
 }
@@ -157,8 +158,8 @@ func (c *Client) Get(ctx context.Context, namespace, name string, result runtime
 	defer cancel()
 	defer func() {
 		span.SetAttributes(
-			attribute.String("namespace", namespace),
-			attribute.String("name", name),
+			attribute.String(tracing.AttributeObjectNamespace, namespace),
+			attribute.String(tracing.AttributeObjectName, name),
 		)
 		if err != nil {
 			span.RecordError(err)
@@ -177,6 +178,9 @@ func (c *Client) Get(ctx context.Context, namespace, name string, result runtime
 		VersionedParams(&options, metav1.ParameterCodec).
 		Do(spanCtx).
 		Into(result)
+	if tracing.IsDistributedTracingEnabled() {
+		tracing.Inject(spanCtx, result)
+	}
 	return
 }
 
@@ -186,10 +190,10 @@ func (c *Client) Get(ctx context.Context, namespace, name string, result runtime
 // additional information in Status will be used to enrich the error.
 func (c *Client) List(ctx context.Context, namespace string, result runtime.Object, opts metav1.ListOptions) (err error) {
 	ctx, cancel := c.setupCtx(ctx)
-	spanCtx, span := clientTracer.Start(ctx, "client.Get")
+	spanCtx, span := clientTracer.Start(ctx, "client.List")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String(tracing.AttributeObjectNamespace, namespace),
 	)
 	defer cancel()
 	defer func() {
@@ -214,6 +218,7 @@ func (c *Client) List(ctx context.Context, namespace string, result runtime.Obje
 		Timeout(timeout).
 		Do(spanCtx).
 		Into(result)
+	// TODO : possible to inject multiple child spans here?
 	return
 }
 
@@ -245,8 +250,11 @@ func (c *Client) Create(ctx context.Context, namespace string, obj, result runti
 	spanCtx, span := clientTracer.Start(ctx, "client.Create")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String(tracing.AttributeObjectNamespace, namespace),
 	)
+	if tracing.IsDistributedTracingEnabled() {
+		tracing.Inject(spanCtx, obj)
+	}
 	defer cancel()
 	defer func() {
 		if err != nil {
@@ -275,10 +283,13 @@ func (c *Client) Create(ctx context.Context, namespace string, obj, result runti
 func (c *Client) Update(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.UpdateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
+	if tracing.IsDistributedTracingEnabled() {
+		ctx = tracing.Extract(ctx, obj)
+	}
 	spanCtx, span := clientTracer.Start(ctx, "client.Update")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String(tracing.AttributeObjectNamespace, namespace),
 	)
 	defer cancel()
 	defer func() {
@@ -296,7 +307,7 @@ func (c *Client) Update(ctx context.Context, namespace string, obj, result runti
 		return
 	}
 	span.SetAttributes(
-		attribute.String("name", m.GetName()),
+		attribute.String(tracing.AttributeObjectName, m.GetName()),
 	)
 	err = c.RESTClient.Put().
 		Prefix(c.prefix...).
@@ -317,10 +328,13 @@ func (c *Client) Update(ctx context.Context, namespace string, obj, result runti
 func (c *Client) UpdateStatus(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.UpdateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
+	if tracing.IsDistributedTracingEnabled() {
+		ctx = tracing.Extract(ctx, obj)
+	}
 	spanCtx, span := clientTracer.Start(ctx, "client.UpdateStatus")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String(tracing.AttributeObjectNamespace, namespace),
 	)
 	defer cancel()
 	defer func() {
@@ -337,7 +351,7 @@ func (c *Client) UpdateStatus(ctx context.Context, namespace string, obj, result
 		return
 	}
 	span.SetAttributes(
-		attribute.String("name", m.GetName()),
+		attribute.String(tracing.AttributeObjectName, m.GetName()),
 	)
 	err = c.RESTClient.Put().
 		Prefix(c.prefix...).
@@ -355,6 +369,12 @@ func (c *Client) UpdateStatus(ctx context.Context, namespace string, obj, result
 // Delete will attempt to delete the resource with the matching name in the given namespace (if client.Namespaced is set to true).
 func (c *Client) Delete(ctx context.Context, namespace, name string, opts metav1.DeleteOptions) error {
 	ctx, cancel := c.setupCtx(ctx)
+	spanCtx, span := clientTracer.Start(ctx, "client.Delete")
+	span.SetAttributes(c.attrs()...)
+	span.SetAttributes(
+		attribute.String(tracing.AttributeObjectNamespace, namespace),
+		attribute.String(tracing.AttributeObjectName, name),
+	)
 	defer cancel()
 	return c.RESTClient.Delete().
 		Prefix(c.prefix...).
@@ -362,7 +382,7 @@ func (c *Client) Delete(ctx context.Context, namespace, name string, opts metav1
 		Resource(c.resource).
 		Name(name).
 		Body(&opts).
-		Do(ctx).
+		Do(spanCtx).
 		Error()
 }
 
@@ -372,7 +392,7 @@ func (c *Client) DeleteCollection(ctx context.Context, namespace string, opts me
 	spanCtx, span := clientTracer.Start(ctx, "client.DeleteCollection")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
-		attribute.String("namespace", namespace),
+		attribute.String(tracing.AttributeObjectNamespace, namespace),
 	)
 	defer cancel()
 	defer func() {
@@ -411,8 +431,8 @@ func (c *Client) Patch(ctx context.Context, namespace, name string, pt types.Pat
 	spanCtx, span := clientTracer.Start(ctx, "client.Patch")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
-		attribute.String("namespace", namespace),
-		attribute.String("name", name),
+		attribute.String(tracing.AttributeObjectNamespace, namespace),
+		attribute.String(tracing.AttributeObjectName, name),
 		attribute.String("patchType", string(pt)),
 		attribute.String("patchData", string(data)),
 		attribute.StringSlice("subresources", subresources),
