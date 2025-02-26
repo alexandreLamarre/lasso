@@ -10,6 +10,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rancher/lasso/pkg/tracing"
+	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -17,6 +21,10 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/rest"
+)
+
+var (
+	clientTracer = otel.Tracer("lasso-client")
 )
 
 // Client performs CRUD like operations on a specific GVR.
@@ -128,6 +136,19 @@ func (c *Client) setupCtx(ctx context.Context) (context.Context, func()) {
 	return context.WithTimeout(ctx, c.timeout)
 }
 
+func (c *Client) setupTracingCtx(ctx context.Context, obj runtime.Object) context.Context {
+	return tracing.Extract(ctx, obj)
+}
+
+func (c *Client) attrs() []attribute.KeyValue {
+	return []attribute.KeyValue{
+		attribute.String("apiVersion", c.apiVersion),
+		attribute.String("kind", c.kind),
+		attribute.StringSlice("prefix", c.prefix),
+		attribute.Bool("namespaced", c.Namespaced),
+	}
+}
+
 // Get will attempt to find the requested resource with the given name in the given namespace (if client.Namespaced is set to true).
 // Get will then attempt to unmarshal the response into the provide result object.
 // If the returned response object is of type Status and has .Status != StatusSuccess, the
@@ -135,14 +156,31 @@ func (c *Client) setupCtx(ctx context.Context) (context.Context, func()) {
 func (c *Client) Get(ctx context.Context, namespace, name string, result runtime.Object, options metav1.GetOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
+
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, result), "client.Get")
+	span.SetAttributes(c.attrs()...)
 	defer cancel()
+	defer func() {
+		span.SetAttributes(
+			attribute.String("namespace", namespace),
+			attribute.String("name", name),
+		)
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "Get")
+		}
+
+		span.End()
+	}()
 	err = c.RESTClient.Get().
 		Prefix(c.prefix...).
 		NamespaceIfScoped(namespace, c.Namespaced).
 		Resource(c.resource).
 		Name(name).
 		VersionedParams(&options, metav1.ParameterCodec).
-		Do(ctx).
+		Do(spanCtx).
 		Into(result)
 	return
 }
@@ -153,7 +191,20 @@ func (c *Client) Get(ctx context.Context, namespace, name string, result runtime
 // additional information in Status will be used to enrich the error.
 func (c *Client) List(ctx context.Context, namespace string, result runtime.Object, opts metav1.ListOptions) (err error) {
 	ctx, cancel := c.setupCtx(ctx)
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, result), "client.List")
+	span.SetAttributes(c.attrs()...)
+	span.SetAttributes(
+		attribute.String("namespace", namespace),
+	)
 	defer cancel()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "List")
+		}
+	}()
 	var timeout time.Duration
 	if opts.TimeoutSeconds != nil {
 		timeout = time.Duration(*opts.TimeoutSeconds) * time.Second
@@ -166,7 +217,7 @@ func (c *Client) List(ctx context.Context, namespace string, result runtime.Obje
 		Prefix(c.prefix...).
 		VersionedParams(&opts, metav1.ParameterCodec).
 		Timeout(timeout).
-		Do(ctx).
+		Do(spanCtx).
 		Into(result)
 	return
 }
@@ -196,14 +247,28 @@ func (c *Client) Watch(ctx context.Context, namespace string, opts metav1.ListOp
 func (c *Client) Create(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.CreateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, obj), "client.Create")
+	span.SetAttributes(c.attrs()...)
+	span.SetAttributes(
+		attribute.String("namespace", namespace),
+	)
 	defer cancel()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "Create")
+		}
+		span.End()
+	}()
 	err = c.RESTClient.Post().
 		Prefix(c.prefix...).
 		NamespaceIfScoped(namespace, c.Namespaced).
 		Resource(c.resource).
 		VersionedParams(&opts, metav1.ParameterCodec).
 		Body(obj).
-		Do(ctx).
+		Do(spanCtx).
 		Into(result)
 	return
 }
@@ -215,11 +280,29 @@ func (c *Client) Create(ctx context.Context, namespace string, obj, result runti
 func (c *Client) Update(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.UpdateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, obj), "client.Update")
+	span.SetAttributes(c.attrs()...)
+	span.SetAttributes(
+		attribute.String("namespace", namespace),
+	)
 	defer cancel()
-	m, err := meta.Accessor(obj)
-	if err != nil {
-		return err
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "Update")
+		}
+		span.End()
+	}()
+	m, merr := meta.Accessor(obj)
+	if merr != nil {
+		err = merr
+		return
 	}
+	span.SetAttributes(
+		attribute.String("name", m.GetName()),
+	)
 	err = c.RESTClient.Put().
 		Prefix(c.prefix...).
 		NamespaceIfScoped(namespace, c.Namespaced).
@@ -227,7 +310,7 @@ func (c *Client) Update(ctx context.Context, namespace string, obj, result runti
 		Name(m.GetName()).
 		VersionedParams(&opts, metav1.ParameterCodec).
 		Body(obj).
-		Do(ctx).
+		Do(spanCtx).
 		Into(result)
 	return
 }
@@ -239,11 +322,28 @@ func (c *Client) Update(ctx context.Context, namespace string, obj, result runti
 func (c *Client) UpdateStatus(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.UpdateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, obj), "client.UpdateStatus")
+	span.SetAttributes(c.attrs()...)
+	span.SetAttributes(
+		attribute.String("namespace", namespace),
+	)
 	defer cancel()
-	m, err := meta.Accessor(obj)
-	if err != nil {
-		return err
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "UpdateStatus")
+		}
+	}()
+	m, merr := meta.Accessor(obj)
+	if merr != nil {
+		err = merr
+		return
 	}
+	span.SetAttributes(
+		attribute.String("name", m.GetName()),
+	)
 	err = c.RESTClient.Put().
 		Prefix(c.prefix...).
 		NamespaceIfScoped(namespace, c.Namespaced).
@@ -252,7 +352,7 @@ func (c *Client) UpdateStatus(ctx context.Context, namespace string, obj, result
 		SubResource("status").
 		VersionedParams(&opts, metav1.ParameterCodec).
 		Body(obj).
-		Do(ctx).
+		Do(spanCtx).
 		Into(result)
 	return
 }
@@ -272,22 +372,38 @@ func (c *Client) Delete(ctx context.Context, namespace, name string, opts metav1
 }
 
 // DeleteCollection will attempt to delete all resource the given namespace (if client.Namespaced is set to true).
-func (c *Client) DeleteCollection(ctx context.Context, namespace string, opts metav1.DeleteOptions, listOpts metav1.ListOptions) error {
+func (c *Client) DeleteCollection(ctx context.Context, namespace string, opts metav1.DeleteOptions, listOpts metav1.ListOptions) (err error) {
 	ctx, cancel := c.setupCtx(ctx)
+	spanCtx, span := clientTracer.Start(ctx, "client.DeleteCollection")
+	span.SetAttributes(c.attrs()...)
+	span.SetAttributes(
+		attribute.String("namespace", namespace),
+	)
 	defer cancel()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "DeleteCollection")
+		}
+		span.End()
+	}()
 	var timeout time.Duration
 	if listOpts.TimeoutSeconds != nil {
 		timeout = time.Duration(*listOpts.TimeoutSeconds) * time.Second
 	}
-	return c.RESTClient.Delete().
+	err = c.RESTClient.Delete().
 		Prefix(c.prefix...).
 		NamespaceIfScoped(namespace, c.Namespaced).
 		Resource(c.resource).
 		VersionedParams(&listOpts, metav1.ParameterCodec).
 		Timeout(timeout).
 		Body(&opts).
-		Do(ctx).
+		Do(spanCtx).
 		Error()
+
+	return
 }
 
 // Patch attempts to patch the existing resource with the provided data and patchType that matches the given name in the given namespace (if client.Namespaced is set to true).
@@ -297,7 +413,25 @@ func (c *Client) DeleteCollection(ctx context.Context, namespace string, opts me
 func (c *Client) Patch(ctx context.Context, namespace, name string, pt types.PatchType, data []byte, result runtime.Object, opts metav1.PatchOptions, subresources ...string) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
+	spanCtx, span := clientTracer.Start(ctx, "client.Patch")
+	span.SetAttributes(c.attrs()...)
+	span.SetAttributes(
+		attribute.String("namespace", namespace),
+		attribute.String("name", name),
+		attribute.String("patchType", string(pt)),
+		attribute.String("patchData", string(data)),
+		attribute.StringSlice("subresources", subresources),
+	)
 	defer cancel()
+	defer func() {
+		if err != nil {
+			span.RecordError(err)
+			span.SetStatus(codes.Error, err.Error())
+		} else {
+			span.SetStatus(codes.Ok, "Patch")
+		}
+		span.End()
+	}()
 	err = c.RESTClient.Patch(pt).
 		Prefix(c.prefix...).
 		Namespace(namespace).
@@ -306,7 +440,7 @@ func (c *Client) Patch(ctx context.Context, namespace, name string, pt types.Pat
 		SubResource(subresources...).
 		VersionedParams(&opts, metav1.ParameterCodec).
 		Body(data).
-		Do(ctx).
+		Do(spanCtx).
 		Into(result)
 	return
 }

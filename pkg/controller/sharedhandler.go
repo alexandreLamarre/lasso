@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/rancher/lasso/pkg/metrics"
+	"github.com/rancher/lasso/pkg/tracing"
+	"go.opentelemetry.io/otel/codes"
 	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -71,10 +73,15 @@ func (h *SharedHandler) OnChange(key string, obj runtime.Object) error {
 	}
 	h.lock.RUnlock()
 
+	ctx := h.setupTracingCtx(context.Background(), obj)
+	spanCtx, span := h.setupSpan(ctx)
+	defer span.End()
+
 	for _, handler := range handlers {
 		var hasError bool
 		reconcileStartTS := time.Now()
-
+		handlerSpanCtx, handlerSpan := controllerTracer.Start(spanCtx, handler.name)
+		tracing.Inject(handlerSpanCtx, obj)
 		newObj, err := handler.handler.OnChange(key, obj)
 		if err != nil && !errors.Is(err, ErrIgnore) {
 			errs = append(errs, &handlerError{
@@ -82,7 +89,9 @@ func (h *SharedHandler) OnChange(key string, obj runtime.Object) error {
 				Err:         err,
 			})
 			hasError = true
+			handlerSpan.SetStatus(codes.Error, err.Error())
 		}
+		handlerSpan.End()
 		metrics.IncTotalHandlerExecutions(h.controllerGVR, handler.name, hasError)
 		reconcileTime := time.Since(reconcileStartTS)
 		metrics.ReportReconcileTime(h.controllerGVR, handler.name, hasError, reconcileTime.Seconds())
@@ -99,7 +108,13 @@ func (h *SharedHandler) OnChange(key string, obj runtime.Object) error {
 		}
 	}
 
-	return errs.ToErr()
+	err := errs.ToErr()
+	if err != nil {
+		span.SetStatus(codes.Error, err.Error())
+		return err
+	}
+	span.SetStatus(codes.Ok, "")
+	return nil
 }
 
 type errorList []error
