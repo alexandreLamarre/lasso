@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/rancher/lasso/pkg/tracing"
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
@@ -135,6 +136,10 @@ func (c *Client) setupCtx(ctx context.Context) (context.Context, func()) {
 	return context.WithTimeout(ctx, c.timeout)
 }
 
+func (c *Client) setupTracingCtx(ctx context.Context, obj runtime.Object) context.Context {
+	return tracing.Extract(ctx, obj)
+}
+
 func (c *Client) attrs() []attribute.KeyValue {
 	return []attribute.KeyValue{
 		attribute.String("apiVersion", c.apiVersion),
@@ -152,7 +157,7 @@ func (c *Client) Get(ctx context.Context, namespace, name string, result runtime
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
 
-	spanCtx, span := clientTracer.Start(ctx, "client.Get")
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, result), "client.Get")
 	span.SetAttributes(c.attrs()...)
 	defer cancel()
 	defer func() {
@@ -186,7 +191,7 @@ func (c *Client) Get(ctx context.Context, namespace, name string, result runtime
 // additional information in Status will be used to enrich the error.
 func (c *Client) List(ctx context.Context, namespace string, result runtime.Object, opts metav1.ListOptions) (err error) {
 	ctx, cancel := c.setupCtx(ctx)
-	spanCtx, span := clientTracer.Start(ctx, "client.Get")
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, result), "client.List")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
@@ -242,7 +247,7 @@ func (c *Client) Watch(ctx context.Context, namespace string, opts metav1.ListOp
 func (c *Client) Create(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.CreateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
-	spanCtx, span := clientTracer.Start(ctx, "client.Create")
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, obj), "client.Create")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
@@ -275,7 +280,7 @@ func (c *Client) Create(ctx context.Context, namespace string, obj, result runti
 func (c *Client) Update(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.UpdateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
-	spanCtx, span := clientTracer.Start(ctx, "client.Update")
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, obj), "client.Update")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
@@ -317,7 +322,7 @@ func (c *Client) Update(ctx context.Context, namespace string, obj, result runti
 func (c *Client) UpdateStatus(ctx context.Context, namespace string, obj, result runtime.Object, opts metav1.UpdateOptions) (err error) {
 	defer c.setKind(result)
 	ctx, cancel := c.setupCtx(ctx)
-	spanCtx, span := clientTracer.Start(ctx, "client.UpdateStatus")
+	spanCtx, span := clientTracer.Start(c.setupTracingCtx(ctx, obj), "client.UpdateStatus")
 	span.SetAttributes(c.attrs()...)
 	span.SetAttributes(
 		attribute.String("namespace", namespace),
